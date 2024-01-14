@@ -2,45 +2,51 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import time
+import sys
+import argparse
+
+# Argument parsing
+parser = argparse.ArgumentParser(description='Bigram Language Model Training Script')
+parser.add_argument('--platform', choices=['cuda', 'mps', 'cpu'], default='cpu', help='Select the platform to run the model on')
+parser.add_argument('--multi_gpu', action='store_true', help='Enable multi-GPU training on CUDA')
+parser.add_argument('--input_file', help="Name of the input file")
+parser.add_argument('--num_epochs', help="Number of epochs to train")
+args = parser.parse_args()
+
+# Set device based on user input
+device = args.platform if args.platform != 'mps' or torch.backends.mps.is_available() else "cpu"
+if device == 'cuda' and not torch.cuda.is_available():
+    raise ValueError("CUDA not available on this machine.")
+elif device == 'mps' and not torch.backends.mps.is_available():
+    raise ValueError("MPS not available on this machine.")
 
 # hyperparameters
-batch_size = 64 # how many independent sequences will be process in parallel?
-block_size = 256 # what is the maximum context length for prediction?
-max_iters = 5000
+batch_size = 64
+block_size = 256
+max_iters = int(args.num_epochs)
 eval_intervals = 500
 learning_rate = 3e-4
-device = "mps" if torch.backends.mps.is_available() else "cpu"
 eval_iters = 200
 n_embd = 384
 n_head = 6
 n_layer = 6
 dropout = 0.2
-# -----------------------
-filename = "dante.txt"
 torch.manual_seed(1337)
 
-# get the dataset
-# ! wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
-
-# read it in to inspect it
-with open(filename, encoding="utf-8") as f:
+# Read dataset
+with open(args.input_file, encoding="utf-8") as f:
     text = f.read()
 
-# here are all the unique characters that occur in this text
 chars = sorted(list(set(text)))
 vocab_size = len(chars)
-
-# create a mapping from characters to integers
-stoi = { ch : i for i, ch in enumerate(chars) }
-itos = { i : ch for i, ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
-decode = lambda l: "".join([itos[i] for i in l]) # decoder: take a list of integers, return a string
+stoi = {ch: i for i, ch in enumerate(chars)}
+itos = {i: ch for i, ch in enumerate(chars)}
+encode = lambda s: [stoi[c] for c in s]
+decode = lambda l: "".join([itos[i] for i in l])
 
 data = torch.tensor(encode(text), dtype=torch.long)
-# Let's now split up the data into the train and validation sets
 n = int(0.9 * len(data))
-train_data = data[:n]
-val_data = data[n:]
+train_data, val_data = data[:n], data[n:]
 
 def get_batch(split):
     # generate a small batch of data of inputs x and targets y
@@ -187,21 +193,30 @@ class BigramLanguageModel(nn.Module):
         return idx
 
 model = BigramLanguageModel()
+
+if args.multi_gpu and device != 'cuda':
+    print(f"Invalid device for multi_gpu training")
+    sys.exit(1)
+
+# Multi-GPU setup
+if args.multi_gpu and device == 'cuda':
+    if torch.cuda.device_count() > 1:
+        print(f"Utilizing {torch.cuda.device_count()} GPUs for training.")
+        model = nn.DataParallel(model)
+    else:
+        print("Multi-GPU training requested, but only a single GPU is available.")
 model = model.to(device)
 
 # create a PyTorch optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-training_time = 0.0
-
+# Training loop
+training_start_time = time.time()
 for iter in range(max_iters):
     # every once in a while evaluate the loss on train and val sets
     if iter % eval_intervals == 0:
         losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, {iter} / {max_iters} epochs, training time {training_time:.2f} s")
-        training_time = 0
-
-    start = time.time()
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, {iter} / {max_iters} epochs")
 
     # sample a batch of data
     xb, yb = get_batch("train")
@@ -213,12 +228,13 @@ for iter in range(max_iters):
     optimizer.step()
     end = time.time()
 
-    training_time += (end - start)
+training_end_time = time.time()
+print(f"Total training time: {training_end_time - training_start_time:.2f} seconds.")
 
-# generate from the model
+# Inference
+inference_start_time = time.time()
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(model.generate(context, max_new_tokens=500)[0].tolist()))
-
-# generate from the model
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(model.generate(context, max_new_tokens=10000)[0].tolist()))
+generated_text = decode(model.generate(context, max_new_tokens=500)[0].tolist())
+print(generated_text)
+inference_end_time = time.time()
+print(f"Inference time: {inference_end_time - inference_start_time:.2f} seconds.")
